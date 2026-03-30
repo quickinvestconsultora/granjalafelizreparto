@@ -1,0 +1,1181 @@
+import { useEffect, useMemo, useState } from "react";
+import logo from "./assets/logo.png";
+
+type TipoHuevo = "" | "B1" | "B2" | "B3" | "C1" | "EXT" | "CC" | "CP";
+type TipoMovimiento = "venta" | "deuda" | "pago";
+
+type Movimiento = {
+  id: string;
+  fecha: string;
+  cliente: string;
+  cantidad: number;
+  tipoHuevo: TipoHuevo;
+  tipoMovimiento: TipoMovimiento;
+  valor: number;
+  efectivo: number;
+  transferencia: number;
+  saldoImpacto: number;
+  nota: string;
+};
+
+type Cliente = {
+  id: string;
+  nombre: string;
+  direccion: string;
+  telefono: string;
+  saldo: number;
+};
+
+type StockItem = {
+  tipo: Exclude<TipoHuevo, "">;
+  inicial: number;
+  carga: number;
+};
+
+type HistorialDia = {
+  id: string;
+  fecha: string;
+  movimientos: Movimiento[];
+  stock: StockItem[];
+  reparto: RepartoItem[];
+  guardadoEn: string;
+};
+
+type RepartoItem = {
+  id: string;
+  nombre: string;
+  direccion: string;
+  fecha: string;
+};
+
+type ClienteForm = {
+  nombre: string;
+  direccion: string;
+  telefono: string;
+};
+
+type MovimientoForm = {
+  cliente: string;
+  cantidad: string;
+  tipoHuevo: TipoHuevo;
+  valor: string;
+  efectivo: string;
+  transferencia: string;
+  cuentaCorriente: string;
+  nota: string;
+};
+
+const TIPOS: Exclude<TipoHuevo, "">[] = ["B1", "B2", "B3", "C1", "EXT", "CC", "CP"];
+
+const STORAGE = {
+  movimientos: "granja_pro_movimientos_v5",
+  clientes: "granja_pro_clientes_v5",
+  stock: "granja_pro_stock_v5",
+  historial: "granja_pro_historial_v5",
+  reparto: "granja_pro_reparto_v5",
+};
+
+const emptyCliente: ClienteForm = {
+  nombre: "",
+  direccion: "",
+  telefono: "",
+};
+
+const emptyMovimiento: MovimientoForm = {
+  cliente: "",
+  cantidad: "",
+  tipoHuevo: "",
+  valor: "",
+  efectivo: "",
+  transferencia: "",
+  cuentaCorriente: "",
+  nota: "",
+};
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function makeId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatMoney(value: number): string {
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 0,
+  }).format(Number(value || 0));
+}
+
+function load<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function save<T>(key: string, value: T): void {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function downloadCsv(filename: string, rows: Record<string, string | number>[]): void {
+  if (!rows.length) return;
+
+  const headers = Object.keys(rows[0]);
+  const csvLines = [
+    headers.join(";"),
+    ...rows.map((row) =>
+      headers
+        .map((header) => {
+          const value = row[header] ?? "";
+          const normalized = String(value).replaceAll('"', '""');
+          return `"${normalized}"`;
+        })
+        .join(";"),
+    ),
+  ];
+
+  const csvContent = "\uFEFF" + csvLines.join("\r\n");
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function createInitialStock(): StockItem[] {
+  return TIPOS.map((tipo) => ({ tipo, inicial: 0, carga: 0 }));
+}
+
+function inputClass(): string {
+  return "w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500";
+}
+
+function buttonClass(primary = false): string {
+  return primary
+    ? "rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+    : "rounded-xl border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50";
+}
+
+function cardClass(): string {
+  return "rounded-2xl border border-slate-200 bg-white shadow-sm";
+}
+
+function tabClass(active: boolean): string {
+  return active
+    ? "rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white"
+    : "rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700";
+}
+
+function StatCard({ title, value }: { title: string; value: string | number }) {
+  return (
+    <div className="rounded-xl bg-slate-100 px-3 py-2 text-sm">
+      <div className="text-slate-500">{title}</div>
+      <div className="text-lg font-semibold">{value}</div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<"reparto" | "carga" | "movimientos" | "stock" | "historial" | "clientes">("reparto");
+
+  const [movimientos, setMovimientos] = useState<Movimiento[]>([]);
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [stock, setStock] = useState<StockItem[]>(createInitialStock());
+  const [historial, setHistorial] = useState<HistorialDia[]>([]);
+  const [reparto, setReparto] = useState<RepartoItem[]>([]);
+
+  const [movForm, setMovForm] = useState<MovimientoForm>(emptyMovimiento);
+  const [clienteForm, setClienteForm] = useState<ClienteForm>(emptyCliente);
+
+  const [mensaje, setMensaje] = useState("");
+  const [busqueda, setBusqueda] = useState("");
+  const [fechaFiltro, setFechaFiltro] = useState("");
+  const [clienteEditandoId, setClienteEditandoId] = useState<string | null>(null);
+  const [movimientoEditandoId, setMovimientoEditandoId] = useState<string | null>(null);
+  const [mostrarClienteForm, setMostrarClienteForm] = useState(false);
+  const [historialSeleccionadoId, setHistorialSeleccionadoId] = useState<string | null>(null);
+  const [repartoTexto, setRepartoTexto] = useState("");
+
+  useEffect(() => {
+    setMovimientos(load(STORAGE.movimientos, []));
+    setClientes(load(STORAGE.clientes, []));
+    setStock(load(STORAGE.stock, createInitialStock()));
+    setHistorial(load(STORAGE.historial, []));
+    const repartoGuardado = load<RepartoItem[]>(STORAGE.reparto, []);
+    setReparto(repartoGuardado.filter((r) => r.fecha === today()));
+  }, []);
+
+  useEffect(() => save(STORAGE.movimientos, movimientos), [movimientos]);
+  useEffect(() => save(STORAGE.clientes, clientes), [clientes]);
+  useEffect(() => save(STORAGE.stock, stock), [stock]);
+  useEffect(() => save(STORAGE.historial, historial), [historial]);
+  useEffect(() => save(STORAGE.reparto, reparto), [reparto]);
+
+  const valorNum = Number(movForm.valor || 0);
+  const efectivoNum = Number(movForm.efectivo || 0);
+  const transferenciaNum = Number(movForm.transferencia || 0);
+  const cantidadNum = Number(movForm.cantidad || 0);
+  const ajusteCCNum = Number(movForm.cuentaCorriente || 0);
+
+  const pagoTotal = efectivoNum + transferenciaNum;
+  const debePreview = Math.max(valorNum - pagoTotal, 0);
+  const saldoFavorPreview =
+    valorNum === 0
+      ? pagoTotal + ajusteCCNum
+      : Math.max(pagoTotal - valorNum, 0) + ajusteCCNum;
+
+  const tipoMovimiento: TipoMovimiento =
+    valorNum === 0 && pagoTotal > 0
+      ? "pago"
+      : valorNum > 0 && pagoTotal === 0 && cantidadNum === 0 && !movForm.tipoHuevo
+        ? "deuda"
+        : "venta";
+
+  const movimientosFiltrados = useMemo(() => {
+    const q = busqueda.toLowerCase().trim();
+    return movimientos.filter((m) => {
+      const okText =
+        !q ||
+        [m.cliente, m.tipoHuevo, m.tipoMovimiento, m.fecha, m.nota]
+          .join(" ")
+          .toLowerCase()
+          .includes(q);
+      const okDate = !fechaFiltro || m.fecha === fechaFiltro;
+      return okText && okDate;
+    });
+  }, [movimientos, busqueda, fechaFiltro]);
+
+  const sugerenciasClientes = useMemo(() => {
+    const q = movForm.cliente.toLowerCase().trim();
+    if (!q) return [];
+    return clientes.filter((c) => c.nombre.toLowerCase().includes(q)).slice(0, 5);
+  }, [clientes, movForm.cliente]);
+
+  const sugerenciasReparto = useMemo(() => {
+    const q = repartoTexto.toLowerCase().trim();
+    if (!q) return [];
+    return clientes.filter((c) => c.nombre.toLowerCase().includes(q)).slice(0, 5);
+  }, [clientes, repartoTexto]);
+
+  const stockCalculado = useMemo(() => {
+    return stock.map((item) => {
+      const ventas = movimientos
+        .filter((m) => m.tipoMovimiento === "venta" && m.tipoHuevo === item.tipo)
+        .reduce((acc, m) => acc + Number(m.cantidad || 0), 0);
+
+      return {
+        ...item,
+        ventas,
+        final: item.inicial + item.carga - ventas,
+      };
+    });
+  }, [stock, movimientos]);
+
+  const totalDebe = movimientosFiltrados
+    .filter((m) => m.saldoImpacto > 0)
+    .reduce((acc, m) => acc + m.saldoImpacto, 0);
+
+  const totalEfectivo = movimientosFiltrados.reduce((acc, m) => acc + m.efectivo, 0);
+  const totalTransferencia = movimientosFiltrados.reduce((acc, m) => acc + m.transferencia, 0);
+  const totalValor = movimientosFiltrados.reduce((acc, m) => acc + m.valor, 0);
+
+  function flash(texto: string) {
+    setMensaje(texto);
+    window.setTimeout(() => setMensaje(""), 2200);
+  }
+
+  function upsertClienteSaldo(nombre: string, diferencia: number) {
+    setClientes((prev) => {
+      const existe = prev.find((c) => c.nombre === nombre);
+      if (!existe) {
+        return [
+          { id: makeId(), nombre, direccion: "", telefono: "", saldo: diferencia },
+          ...prev,
+        ];
+      }
+      return prev.map((c) =>
+        c.nombre === nombre ? { ...c, saldo: c.saldo + diferencia } : c,
+      );
+    });
+  }
+
+  function limpiarMovimiento() {
+    setMovForm(emptyMovimiento);
+    setMovimientoEditandoId(null);
+  }
+
+  function asegurarRepartoDelCliente(nombre: string) {
+    const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
+    const nombreFinal = cli?.nombre ?? nombre;
+    if (
+      reparto.some(
+        (r) => r.nombre.toLowerCase() === nombreFinal.toLowerCase() && r.fecha === today(),
+      )
+    ) {
+      return;
+    }
+
+    setReparto((prev) => [
+      ...prev,
+      {
+        id: makeId(),
+        nombre: nombreFinal,
+        direccion: cli?.direccion || "Sin dirección",
+        fecha: today(),
+      },
+    ]);
+  }
+
+  function guardarMovimiento() {
+    const cliente = movForm.cliente.trim();
+
+    if (!cliente) return flash("Ingresá un cliente.");
+    if (valorNum === 0 && pagoTotal === 0) return flash("Ingresá un valor o un pago.");
+
+    if (tipoMovimiento === "pago" && (cantidadNum > 0 || !!movForm.tipoHuevo)) {
+      return flash("Si es pago, no cargues cantidad ni tipo.");
+    }
+
+    const saldoImpacto =
+      tipoMovimiento === "pago"
+        ? -saldoFavorPreview
+        : debePreview - Math.max(pagoTotal - valorNum, 0) - ajusteCCNum;
+
+    const movimiento: Movimiento = {
+      id: movimientoEditandoId ?? makeId(),
+      fecha: today(),
+      cliente,
+      cantidad: tipoMovimiento === "pago" ? 0 : cantidadNum,
+      tipoHuevo:
+        tipoMovimiento === "pago" || tipoMovimiento === "deuda"
+          ? ""
+          : movForm.tipoHuevo,
+      tipoMovimiento,
+      valor: valorNum,
+      efectivo: efectivoNum,
+      transferencia: transferenciaNum,
+      saldoImpacto,
+      nota: movForm.nota.trim(),
+    };
+
+    if (movimientoEditandoId) {
+      const anterior = movimientos.find((m) => m.id === movimientoEditandoId);
+      if (anterior) upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+
+      setMovimientos((prev) =>
+        prev.map((m) => (m.id === movimientoEditandoId ? movimiento : m)),
+      );
+
+      upsertClienteSaldo(cliente, saldoImpacto);
+      if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
+      limpiarMovimiento();
+      return flash("Movimiento actualizado.");
+    }
+
+    setMovimientos((prev) => [movimiento, ...prev]);
+    upsertClienteSaldo(cliente, saldoImpacto);
+    if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
+    limpiarMovimiento();
+    flash("Movimiento guardado.");
+  }
+
+  function editarMovimiento(m: Movimiento) {
+    setMovimientoEditandoId(m.id);
+    setMovForm({
+      cliente: m.cliente,
+      cantidad: m.cantidad ? String(m.cantidad) : "",
+      tipoHuevo: m.tipoHuevo,
+      valor: m.valor ? String(m.valor) : "",
+      efectivo: m.efectivo ? String(m.efectivo) : "",
+      transferencia: m.transferencia ? String(m.transferencia) : "",
+      cuentaCorriente: "",
+      nota: m.nota,
+    });
+    setTab("carga");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function borrarMovimiento(id: string) {
+    const anterior = movimientos.find((m) => m.id === id);
+    if (anterior) upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+
+    setMovimientos((prev) => prev.filter((m) => m.id !== id));
+
+    if (movimientoEditandoId === id) limpiarMovimiento();
+    flash("Movimiento eliminado.");
+  }
+
+  function guardarCliente() {
+    const nombre = clienteForm.nombre.trim();
+    if (!nombre) return flash("Ingresá un nombre.");
+
+    if (clienteEditandoId) {
+      setClientes((prev) =>
+        prev.map((c) =>
+          c.id === clienteEditandoId
+            ? {
+                ...c,
+                nombre,
+                direccion: clienteForm.direccion.trim(),
+                telefono: clienteForm.telefono.trim(),
+              }
+            : c,
+        ),
+      );
+      setClienteEditandoId(null);
+      setClienteForm(emptyCliente);
+      setMostrarClienteForm(false);
+      return flash("Cliente actualizado.");
+    }
+
+    const existe = clientes.some((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
+    if (existe) return flash("Ese cliente ya existe.");
+
+    setClientes((prev) => [
+      {
+        id: makeId(),
+        nombre,
+        direccion: clienteForm.direccion.trim(),
+        telefono: clienteForm.telefono.trim(),
+        saldo: 0,
+      },
+      ...prev,
+    ]);
+
+    setClienteForm(emptyCliente);
+    setMostrarClienteForm(false);
+    flash("Cliente agregado.");
+  }
+
+  function editarCliente(c: Cliente) {
+    setClienteEditandoId(c.id);
+    setClienteForm({
+      nombre: c.nombre,
+      direccion: c.direccion,
+      telefono: c.telefono,
+    });
+    setMostrarClienteForm(true);
+    setTab("clientes");
+  }
+
+  function abrirWhatsapp(c: Cliente) {
+    let telefono = String(c.telefono || "").replace(/\D/g, "");
+    if (!telefono) return flash("El cliente no tiene teléfono.");
+
+    if (!telefono.startsWith("54")) telefono = `54${telefono}`;
+    if (!telefono.startsWith("549")) telefono = telefono.replace(/^54/, "549");
+
+    const texto =
+      c.saldo > 0
+        ? `Hola ${c.nombre}, su deuda es ${formatMoney(c.saldo)}`
+        : c.saldo < 0
+          ? `Hola ${c.nombre}, su saldo a favor es ${formatMoney(Math.abs(c.saldo))}`
+          : `Hola ${c.nombre}, su saldo es 0`;
+
+    window.location.href = `https://wa.me/${telefono}?text=${encodeURIComponent(texto)}`;
+  }
+
+  function guardarDia() {
+    const dia: HistorialDia = {
+      id: makeId(),
+      fecha: today(),
+      movimientos: movimientos.filter((m) => m.fecha === today()),
+      stock,
+      reparto,
+      guardadoEn: new Date().toISOString(),
+    };
+
+    setHistorial((prev) => [dia, ...prev]);
+
+    const stockSiguiente: StockItem[] = stockCalculado.map((s) => ({
+      tipo: s.tipo,
+      inicial: s.final,
+      carga: 0,
+    }));
+
+    setStock(stockSiguiente);
+    setMovimientos([]);
+    setReparto([]);
+    limpiarMovimiento();
+
+    flash("Día guardado y nuevo reparto iniciado con el stock final como inicial.");
+  }
+
+  function agregarRepartoManual(nombreRaw?: string) {
+    const nombre = (nombreRaw ?? repartoTexto).trim();
+    if (!nombre) return flash("Ingresá un nombre para reparto.");
+
+    const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
+    const nombreFinal = cli?.nombre ?? nombre;
+
+    if (
+      reparto.some(
+        (r) => r.nombre.toLowerCase() === nombreFinal.toLowerCase() && r.fecha === today(),
+      )
+    ) {
+      return flash("Ese cliente ya está en el reparto de hoy.");
+    }
+
+    setReparto((prev) => [
+      ...prev,
+      {
+        id: makeId(),
+        nombre: nombreFinal,
+        direccion: cli?.direccion || "Sin dirección",
+        fecha: today(),
+      },
+    ]);
+
+    setRepartoTexto("");
+    flash("Agregado al reparto.");
+  }
+
+  function quitarReparto(id: string) {
+    setReparto((prev) => prev.filter((r) => r.id !== id));
+  }
+
+  function exportarCSVMovimientos() {
+    const rows = movimientos.map((m) => ({
+      Fecha: m.fecha,
+      Cliente: m.cliente,
+      Movimiento: m.tipoMovimiento,
+      Cantidad: m.cantidad,
+      Tipo: m.tipoHuevo || "",
+      Valor: m.valor,
+      Efectivo: m.efectivo,
+      Transferencia: m.transferencia,
+      Saldo: m.saldoImpacto,
+      Nota: m.nota || "",
+    }));
+    downloadCsv(`movimientos-${today()}.csv`, rows);
+  }
+
+  function exportarCSVStock() {
+    const rows = stockCalculado.map((s) => ({
+      Tipo: s.tipo,
+      Inicial: s.inicial,
+      Carga: s.carga,
+      Ventas: s.ventas,
+      Final: s.final,
+    }));
+    downloadCsv(`stock-${today()}.csv`, rows);
+  }
+
+  function exportarCSVReparto() {
+    const rows = reparto.map((r, index) => ({
+      Orden: index + 1,
+      Fecha: r.fecha,
+      Nombre: r.nombre,
+      Direccion: r.direccion,
+    }));
+    downloadCsv(`reparto-${today()}.csv`, rows);
+  }
+
+  function exportarCSVHistorialDia(dia: HistorialDia) {
+    const rows = dia.movimientos.map((m) => ({
+      Fecha: m.fecha,
+      Cliente: m.cliente,
+      Movimiento: m.tipoMovimiento,
+      Cantidad: m.cantidad,
+      Tipo: m.tipoHuevo || "",
+      Valor: m.valor,
+      Efectivo: m.efectivo,
+      Transferencia: m.transferencia,
+      Saldo: m.saldoImpacto,
+      Nota: m.nota || "",
+    }));
+    downloadCsv(`historial-${dia.fecha}.csv`, rows);
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900">
+      <div className="mx-auto max-w-7xl space-y-5">
+        <div className={`${cardClass()} p-5`}>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <img
+                src={logo}
+                alt="Logo Granja La Feliz"
+                className="h-16 w-16 rounded-2xl object-contain bg-white p-2 shadow-sm"
+              />
+              <div>
+                <h1 className="text-2xl font-bold">Granja La Feliz Reparto</h1>
+                <p className="text-sm text-slate-500">
+                  Versión completa con guardado del día, reparto, stock y clientes.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <StatCard title="Movimientos" value={movimientos.length} />
+              <StatCard title="Clientes" value={clientes.length} />
+              <StatCard title="Debe" value={formatMoney(totalDebe)} />
+              <StatCard title="Fecha" value={today()} />
+            </div>
+          </div>
+        </div>
+
+        {mensaje && (
+          <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            {mensaje}
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          <button className={tabClass(tab === "reparto")} onClick={() => setTab("reparto")}>
+            Reparto
+          </button>
+          <button className={tabClass(tab === "carga")} onClick={() => setTab("carga")}>
+            Carga
+          </button>
+          <button className={tabClass(tab === "movimientos")} onClick={() => setTab("movimientos")}>
+            Movimientos
+          </button>
+          <button className={tabClass(tab === "stock")} onClick={() => setTab("stock")}>
+            Stock
+          </button>
+          <button className={tabClass(tab === "historial")} onClick={() => setTab("historial")}>
+            Historial
+          </button>
+          <button className={tabClass(tab === "clientes")} onClick={() => setTab("clientes")}>
+            Clientes
+          </button>
+        </div>
+
+        {tab === "reparto" && (
+          <div className={`${cardClass()} p-5`}>
+            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <h2 className="text-xl font-semibold">Reparto del día</h2>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative min-w-[260px]">
+                  <input
+                    className={inputClass()}
+                    value={repartoTexto}
+                    onChange={(e) => setRepartoTexto(e.target.value)}
+                    placeholder="Agregar cliente o esporádico"
+                  />
+                  {sugerenciasReparto.length > 0 && repartoTexto.trim() && (
+                    <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
+                      {sugerenciasReparto.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                          onClick={() => agregarRepartoManual(c.nombre)}
+                        >
+                          {c.nombre}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <button className={buttonClass(true)} onClick={() => agregarRepartoManual()}>
+                    Agregar reparto
+                  </button>
+                  <button className={buttonClass(false)} onClick={exportarCSVReparto}>
+                    Exportar CSV
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {reparto.length === 0 && (
+                <div className="text-sm text-slate-500">
+                  Todavía no hay reparto cargado para hoy.
+                </div>
+              )}
+
+              {reparto.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  className="block w-full rounded-xl border border-slate-200 p-4 text-left hover:bg-slate-50"
+                  onClick={() => quitarReparto(r.id)}
+                >
+                  <div className="font-semibold">{r.nombre}</div>
+                  <div className="text-sm text-slate-500">{r.direccion}</div>
+                  <div className="mt-1 text-xs text-slate-400">Tocar para quitar del reparto</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "carga" && (
+          <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+            <div className={`${cardClass()} p-5`}>
+              <h2 className="mb-4 text-xl font-semibold">
+                {movimientoEditandoId ? "Editar movimiento" : "Nuevo movimiento"}
+              </h2>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="relative md:col-span-2">
+                  <label className="mb-2 block text-sm">Cliente</label>
+                  <input
+                    className={inputClass()}
+                    value={movForm.cliente}
+                    onChange={(e) => setMovForm((p) => ({ ...p, cliente: e.target.value }))}
+                    placeholder="Nombre del cliente"
+                  />
+                  {sugerenciasClientes.length > 0 && movForm.cliente.trim() && (
+                    <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
+                      {sugerenciasClientes.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                          onClick={() => setMovForm((p) => ({ ...p, cliente: c.nombre }))}
+                        >
+                          {c.nombre}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Cantidad</label>
+                  <input
+                    className={inputClass()}
+                    type="number"
+                    value={movForm.cantidad}
+                    onChange={(e) => setMovForm((p) => ({ ...p, cantidad: e.target.value }))}
+                    placeholder="Opcional"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Tipo huevo</label>
+                  <select
+                    className={inputClass()}
+                    value={movForm.tipoHuevo}
+                    onChange={(e) => setMovForm((p) => ({ ...p, tipoHuevo: e.target.value as TipoHuevo }))}
+                  >
+                    <option value="">Sin tipo</option>
+                    {TIPOS.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Valor</label>
+                  <input
+                    className={inputClass()}
+                    type="number"
+                    value={movForm.valor}
+                    onChange={(e) => setMovForm((p) => ({ ...p, valor: e.target.value }))}
+                    placeholder="Para venta o deuda"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Efectivo</label>
+                  <input
+                    className={inputClass()}
+                    type="number"
+                    value={movForm.efectivo}
+                    onChange={(e) => setMovForm((p) => ({ ...p, efectivo: e.target.value }))}
+                    placeholder="Para pago o venta"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Transferencia</label>
+                  <input
+                    className={inputClass()}
+                    type="number"
+                    value={movForm.transferencia}
+                    onChange={(e) => setMovForm((p) => ({ ...p, transferencia: e.target.value }))}
+                    placeholder="Para pago o venta"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm">Cuenta corriente</label>
+                  <input
+                    className={inputClass()}
+                    type="number"
+                    value={movForm.cuentaCorriente}
+                    onChange={(e) => setMovForm((p) => ({ ...p, cuentaCorriente: e.target.value }))}
+                    placeholder="Ajuste opcional"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="mb-2 block text-sm">Nota</label>
+                  <input
+                    className={inputClass()}
+                    value={movForm.nota}
+                    onChange={(e) => setMovForm((p) => ({ ...p, nota: e.target.value }))}
+                    placeholder="Aclaración opcional"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700">
+                <div>
+                  <strong>Tipo detectado:</strong> {tipoMovimiento}
+                </div>
+                <div>
+                  <strong>Debe:</strong> {formatMoney(debePreview)}
+                </div>
+                <div>
+                  <strong>Saldo a favor / pago:</strong> {formatMoney(saldoFavorPreview)}
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button className={buttonClass(true)} onClick={guardarMovimiento}>
+                  {movimientoEditandoId ? "Guardar cambios" : "Guardar movimiento"}
+                </button>
+                <button className={buttonClass(false)} onClick={limpiarMovimiento}>
+                  Limpiar
+                </button>
+              </div>
+            </div>
+
+            <div className={`${cardClass()} p-5`}>
+              <h2 className="mb-4 text-xl font-semibold">Cómo usar</h2>
+              <div className="space-y-3 text-sm text-slate-600">
+                <div className="rounded-xl bg-slate-100 p-3">
+                  <strong>Deuda:</strong> cliente + valor.
+                </div>
+                <div className="rounded-xl bg-slate-100 p-3">
+                  <strong>Pago:</strong> cliente + efectivo y/o transferencia.
+                </div>
+                <div className="rounded-xl bg-slate-100 p-3">
+                  <strong>Venta:</strong> valor + cantidad o tipo.
+                </div>
+                <div className="rounded-xl bg-slate-100 p-3">
+                  Al guardar una venta o deuda, el cliente también se agrega al reparto del día.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === "movimientos" && (
+          <div className={`${cardClass()} p-5`}>
+            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <h2 className="text-xl font-semibold">Movimientos</h2>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  className={inputClass()}
+                  value={busqueda}
+                  onChange={(e) => setBusqueda(e.target.value)}
+                  placeholder="Buscar cliente, fecha o movimiento"
+                />
+                <input
+                  className={inputClass()}
+                  type="date"
+                  value={fechaFiltro}
+                  onChange={(e) => setFechaFiltro(e.target.value)}
+                />
+                <button className={buttonClass(false)} onClick={() => setFechaFiltro("")}>
+                  Limpiar
+                </button>
+                <button className={buttonClass(false)} onClick={exportarCSVMovimientos}>
+                  Exportar CSV
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-4 grid gap-3 md:grid-cols-4">
+              <StatCard title="Valor" value={formatMoney(totalValor)} />
+              <StatCard title="Efectivo" value={formatMoney(totalEfectivo)} />
+              <StatCard title="Transferencia" value={formatMoney(totalTransferencia)} />
+              <StatCard title="Debe" value={formatMoney(totalDebe)} />
+            </div>
+
+            <div className="overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left">
+                    <th className="px-2 py-2">Fecha</th>
+                    <th className="px-2 py-2">Cliente</th>
+                    <th className="px-2 py-2">Movimiento</th>
+                    <th className="px-2 py-2">Cant.</th>
+                    <th className="px-2 py-2">Tipo</th>
+                    <th className="px-2 py-2">Valor</th>
+                    <th className="px-2 py-2">Efectivo</th>
+                    <th className="px-2 py-2">Transferencia</th>
+                    <th className="px-2 py-2">Saldo</th>
+                    <th className="px-2 py-2">Nota</th>
+                    <th className="px-2 py-2">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {movimientosFiltrados.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="px-2 py-8 text-center text-slate-500">
+                        No hay movimientos.
+                      </td>
+                    </tr>
+                  )}
+
+                  {movimientosFiltrados.map((m) => (
+                    <tr key={m.id} className="border-b border-slate-100 align-top">
+                      <td className="px-2 py-2">{m.fecha}</td>
+                      <td className="px-2 py-2 font-medium">{m.cliente}</td>
+                      <td className="px-2 py-2 capitalize">{m.tipoMovimiento}</td>
+                      <td className="px-2 py-2">{m.cantidad || "-"}</td>
+                      <td className="px-2 py-2">{m.tipoHuevo || "-"}</td>
+                      <td className="px-2 py-2">{formatMoney(m.valor)}</td>
+                      <td className="px-2 py-2">{formatMoney(m.efectivo)}</td>
+                      <td className="px-2 py-2">{formatMoney(m.transferencia)}</td>
+                      <td
+                        className={`px-2 py-2 font-medium ${
+                          m.saldoImpacto > 0
+                            ? "text-red-600"
+                            : m.saldoImpacto < 0
+                              ? "text-emerald-600"
+                              : "text-slate-700"
+                        }`}
+                      >
+                        {formatMoney(m.saldoImpacto)}
+                      </td>
+                      <td className="px-2 py-2">{m.nota || "-"}</td>
+                      <td className="px-2 py-2">
+                        <div className="flex gap-2">
+                          <button className={buttonClass(false)} onClick={() => editarMovimiento(m)}>
+                            Editar
+                          </button>
+                          <button className={buttonClass(false)} onClick={() => borrarMovimiento(m.id)}>
+                            Borrar
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {tab === "stock" && (
+          <div className={`${cardClass()} p-5`}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Stock</h2>
+              <button className={buttonClass(false)} onClick={exportarCSVStock}>
+                Exportar CSV
+              </button>
+            </div>
+
+            <div className="overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left">
+                    <th className="px-2 py-2">Tipo</th>
+                    <th className="px-2 py-2">Inicial</th>
+                    <th className="px-2 py-2">Carga</th>
+                    <th className="px-2 py-2">Ventas</th>
+                    <th className="px-2 py-2">Final</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stockCalculado.map((s) => (
+                    <tr key={s.tipo} className="border-b border-slate-100">
+                      <td className="px-2 py-2 font-medium">{s.tipo}</td>
+                      <td className="px-2 py-2">
+                        <input
+                          className={inputClass()}
+                          type="number"
+                          value={s.inicial}
+                          onChange={(e) =>
+                            setStock((prev) =>
+                              prev.map((x) =>
+                                x.tipo === s.tipo ? { ...x, inicial: Number(e.target.value || 0) } : x,
+                              ),
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="px-2 py-2">
+                        <input
+                          className={inputClass()}
+                          type="number"
+                          value={s.carga}
+                          onChange={(e) =>
+                            setStock((prev) =>
+                              prev.map((x) =>
+                                x.tipo === s.tipo ? { ...x, carga: Number(e.target.value || 0) } : x,
+                              ),
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="px-2 py-2">{s.ventas}</td>
+                      <td className="px-2 py-2 font-semibold">{s.final}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {tab === "historial" && (
+          <div className={`${cardClass()} p-5`}>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Historial</h2>
+              <button className={buttonClass(true)} onClick={guardarDia}>
+                Guardar día
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {historial.length === 0 && (
+                <div className="text-sm text-slate-500">Todavía no hay días guardados.</div>
+              )}
+
+              {historial.map((h) => (
+                <div key={h.id} className="rounded-xl border border-slate-200 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">{h.fecha}</div>
+                      <div className="text-sm text-slate-500">Movimientos: {h.movimientos.length}</div>
+                      <div className="text-sm text-slate-500">Reparto: {h.reparto.length}</div>
+                      <div className="text-sm text-slate-500">
+                        Guardado: {new Date(h.guardadoEn).toLocaleString("es-AR")}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        className={buttonClass(false)}
+                        onClick={() =>
+                          setHistorialSeleccionadoId((prev) => (prev === h.id ? null : h.id))
+                        }
+                      >
+                        {historialSeleccionadoId === h.id ? "Ocultar detalle" : "Ver detalle"}
+                      </button>
+                      <button className={buttonClass(false)} onClick={() => exportarCSVHistorialDia(h)}>
+                        Exportar CSV
+                      </button>
+                    </div>
+                  </div>
+
+                  {historialSeleccionadoId === h.id && (
+                    <div className="mt-3 space-y-2 rounded-xl bg-slate-100 p-3 text-sm">
+                      {h.movimientos.map((m) => (
+                        <div key={m.id} className="border-b border-slate-200 py-2 last:border-b-0">
+                          {m.cliente} · {m.tipoMovimiento} · {formatMoney(m.valor)}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "clientes" && (
+          <div className={`${cardClass()} p-5`}>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-xl font-semibold">Clientes</h2>
+              <button className={buttonClass(true)} onClick={() => setMostrarClienteForm((p) => !p)}>
+                {mostrarClienteForm ? "Cerrar" : "Agregar cliente"}
+              </button>
+            </div>
+
+            {mostrarClienteForm && (
+              <div className="mb-4 grid gap-3 rounded-xl border border-slate-200 p-4 md:grid-cols-3">
+                <input
+                  className={inputClass()}
+                  placeholder="Nombre"
+                  value={clienteForm.nombre}
+                  onChange={(e) => setClienteForm((p) => ({ ...p, nombre: e.target.value }))}
+                />
+                <input
+                  className={inputClass()}
+                  placeholder="Dirección"
+                  value={clienteForm.direccion}
+                  onChange={(e) => setClienteForm((p) => ({ ...p, direccion: e.target.value }))}
+                />
+                <input
+                  className={inputClass()}
+                  placeholder="Teléfono"
+                  value={clienteForm.telefono}
+                  onChange={(e) => setClienteForm((p) => ({ ...p, telefono: e.target.value }))}
+                />
+                <div className="md:col-span-3 flex gap-2">
+                  <button className={buttonClass(true)} onClick={guardarCliente}>
+                    {clienteEditandoId ? "Guardar cambios" : "Guardar cliente"}
+                  </button>
+                  {clienteEditandoId && (
+                    <button
+                      className={buttonClass(false)}
+                      onClick={() => {
+                        setClienteEditandoId(null);
+                        setClienteForm(emptyCliente);
+                        setMostrarClienteForm(false);
+                      }}
+                    >
+                      Cancelar
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {clientes.length === 0 && (
+                <div className="text-sm text-slate-500">Todavía no hay clientes cargados.</div>
+              )}
+
+              {clientes.map((c) => (
+                <div key={c.id} className="rounded-xl border border-slate-200 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">{c.nombre}</div>
+                      <div className="text-sm text-slate-500">{c.direccion || "Sin dirección"}</div>
+                      <div className="text-sm text-slate-500">{c.telefono || "Sin teléfono"}</div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div
+                        className={`rounded-xl px-3 py-2 text-sm font-medium ${
+                          c.saldo > 0
+                            ? "bg-red-50 text-red-700"
+                            : c.saldo < 0
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {c.saldo > 0
+                          ? `Deuda: ${formatMoney(c.saldo)}`
+                          : c.saldo < 0
+                            ? `Saldo a favor: ${formatMoney(Math.abs(c.saldo))}`
+                            : `Saldo: ${formatMoney(0)}`}
+                      </div>
+
+                      <button className={buttonClass(false)} onClick={() => editarCliente(c)}>
+                        Editar
+                      </button>
+                      <button className={buttonClass(false)} onClick={() => abrirWhatsapp(c)}>
+                        WhatsApp
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
