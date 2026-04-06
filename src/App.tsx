@@ -1,6 +1,7 @@
 import { supabase } from "./lib/supabase";
 import { useEffect, useMemo, useState } from "react";
 import logo from "./assets/logo.png";
+import AuthGate from "./AuthGate";
 
 type TipoHuevo = "" | "B1" | "B2" | "B3" | "C1" | "EXT" | "CC" | "CP";
 type TipoMovimiento = "venta" | "deuda" | "pago";
@@ -767,7 +768,8 @@ export default function App() {
     downloadCsv(`historial-${dia.fecha}.csv`, rows);
   }
 
-  return (
+return (
+  <AuthGate>
     <div className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900">
       <div className="mx-auto max-w-7xl space-y-5">
         <div className={`${cardClass()} p-5`}>
@@ -1112,8 +1114,8 @@ export default function App() {
                           m.saldoImpacto > 0
                             ? "text-red-600"
                             : m.saldoImpacto < 0
-                              ? "text-emerald-600"
-                              : "text-slate-700"
+                            ? "text-emerald-600"
+                            : "text-slate-700"
                         }`}
                       >
                         {formatMoney(m.saldoImpacto)}
@@ -1227,9 +1229,7 @@ export default function App() {
                     <div className="flex flex-wrap gap-2">
                       <button
                         className={buttonClass(false)}
-                        onClick={() =>
-                          setHistorialSeleccionadoId((prev) => (prev === h.id ? null : h.id))
-                        }
+                        onClick={() => setHistorialSeleccionadoId((prev) => (prev === h.id ? null : h.id))}
                       >
                         {historialSeleccionadoId === h.id ? "Ocultar detalle" : "Ver detalle"}
                       </button>
@@ -1323,15 +1323,15 @@ export default function App() {
                           c.saldo > 0
                             ? "bg-red-50 text-red-700"
                             : c.saldo < 0
-                              ? "bg-emerald-50 text-emerald-700"
-                              : "bg-slate-100 text-slate-700"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : "bg-slate-100 text-slate-700"
                         }`}
                       >
                         {c.saldo > 0
                           ? `Deuda: ${formatMoney(c.saldo)}`
                           : c.saldo < 0
-                            ? `Saldo a favor: ${formatMoney(Math.abs(c.saldo))}`
-                            : `Saldo: ${formatMoney(0)}`}
+                          ? `Saldo a favor: ${formatMoney(Math.abs(c.saldo))}`
+                          : `Saldo: ${formatMoney(0)}`}
                       </div>
 
                       <button className={buttonClass(false)} onClick={() => editarCliente(c)}>
@@ -1349,5 +1349,6 @@ export default function App() {
         )}
       </div>
     </div>
-  );
+  </AuthGate>
+);
 }
