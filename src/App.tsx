@@ -1,3 +1,4 @@
+import { supabase } from "./lib/supabase";
 import { useEffect, useMemo, useState } from "react";
 import logo from "./assets/logo.png";
 
@@ -68,8 +69,6 @@ type MovimientoForm = {
 const TIPOS: Exclude<TipoHuevo, "">[] = ["B1", "B2", "B3", "C1", "EXT", "CC", "CP"];
 
 const STORAGE = {
-  movimientos: "granja_pro_movimientos_v5",
-  clientes: "granja_pro_clientes_v5",
   stock: "granja_pro_stock_v5",
   historial: "granja_pro_historial_v5",
   reparto: "granja_pro_reparto_v5",
@@ -205,16 +204,60 @@ export default function App() {
   const [repartoTexto, setRepartoTexto] = useState("");
 
   useEffect(() => {
-    setMovimientos(load(STORAGE.movimientos, []));
-    setClientes(load(STORAGE.clientes, []));
-    setStock(load(STORAGE.stock, createInitialStock()));
-    setHistorial(load(STORAGE.historial, []));
-    const repartoGuardado = load<RepartoItem[]>(STORAGE.reparto, []);
-    setReparto(repartoGuardado.filter((r) => r.fecha === today()));
+    async function cargarDatos() {
+      const { data: clientesData, error: clientesError } = await supabase
+        .from("clientes")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (clientesError) {
+        console.error("Error cargando clientes:", clientesError);
+      } else {
+        setClientes(
+          (clientesData ?? []).map((c) => ({
+            id: String(c.id),
+            nombre: c.nombre ?? "",
+            direccion: c.direccion ?? "",
+            telefono: c.telefono ? String(c.telefono) : "",
+            saldo: Number(c.saldo ?? 0),
+          })),
+        );
+      }
+
+      const { data: movimientosData, error: movimientosError } = await supabase
+        .from("movimientos")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (movimientosError) {
+        console.error("Error cargando movimientos:", movimientosError);
+      } else {
+        setMovimientos(
+          (movimientosData ?? []).map((m) => ({
+            id: String(m.id),
+            fecha: m.fecha,
+            cliente: m.cliente,
+            cantidad: Number(m.cantidad ?? 0),
+            tipoHuevo: (m.tipo_huevo ?? "") as TipoHuevo,
+            tipoMovimiento: m.tipo_movimiento as TipoMovimiento,
+            valor: Number(m.valor ?? 0),
+            efectivo: Number(m.efectivo ?? 0),
+            transferencia: Number(m.transferencia ?? 0),
+            saldoImpacto: Number(m.saldo_impacto ?? 0),
+            nota: m.nota ?? "",
+          })),
+        );
+      }
+
+      setStock(load(STORAGE.stock, createInitialStock()));
+      setHistorial(load(STORAGE.historial, []));
+      const repartoGuardado = load<RepartoItem[]>(STORAGE.reparto, []);
+      setReparto(repartoGuardado.filter((r) => r.fecha === today()));
+    }
+
+    cargarDatos();
   }, []);
 
-  useEffect(() => save(STORAGE.movimientos, movimientos), [movimientos]);
-  useEffect(() => save(STORAGE.clientes, clientes), [clientes]);
   useEffect(() => save(STORAGE.stock, stock), [stock]);
   useEffect(() => save(STORAGE.historial, historial), [historial]);
   useEffect(() => save(STORAGE.reparto, reparto), [reparto]);
@@ -292,19 +335,55 @@ export default function App() {
     window.setTimeout(() => setMensaje(""), 2200);
   }
 
-  function upsertClienteSaldo(nombre: string, diferencia: number) {
-    setClientes((prev) => {
-      const existe = prev.find((c) => c.nombre === nombre);
-      if (!existe) {
-        return [
-          { id: makeId(), nombre, direccion: "", telefono: "", saldo: diferencia },
-          ...prev,
-        ];
+  async function upsertClienteSaldo(nombre: string, diferencia: number) {
+    const clienteExistente = clientes.find((c) => c.nombre === nombre);
+
+    if (!clienteExistente) {
+      const { data, error } = await supabase
+        .from("clientes")
+        .insert({
+          nombre,
+          direccion: "",
+          telefono: "",
+          saldo: diferencia,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error creando cliente por saldo:", error);
+        return;
       }
-      return prev.map((c) =>
-        c.nombre === nombre ? { ...c, saldo: c.saldo + diferencia } : c,
-      );
-    });
+
+      const clienteNuevo: Cliente = {
+        id: String(data.id),
+        nombre: data.nombre ?? "",
+        direccion: data.direccion ?? "",
+        telefono: data.telefono ? String(data.telefono) : "",
+        saldo: Number(data.saldo ?? 0),
+      };
+
+      setClientes((prev) => [clienteNuevo, ...prev]);
+      return;
+    }
+
+    const nuevoSaldo = Number(clienteExistente.saldo || 0) + Number(diferencia || 0);
+
+    const { error } = await supabase
+      .from("clientes")
+      .update({ saldo: nuevoSaldo })
+      .eq("id", clienteExistente.id);
+
+    if (error) {
+      console.error("Error actualizando saldo:", error);
+      return;
+    }
+
+    setClientes((prev) =>
+      prev.map((c) =>
+        c.id === clienteExistente.id ? { ...c, saldo: nuevoSaldo } : c,
+      ),
+    );
   }
 
   function limpiarMovimiento() {
@@ -315,6 +394,7 @@ export default function App() {
   function asegurarRepartoDelCliente(nombre: string) {
     const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
     const nombreFinal = cli?.nombre ?? nombre;
+
     if (
       reparto.some(
         (r) => r.nombre.toLowerCase() === nombreFinal.toLowerCase() && r.fecha === today(),
@@ -334,7 +414,7 @@ export default function App() {
     ]);
   }
 
-  function guardarMovimiento() {
+  async function guardarMovimiento() {
     const cliente = movForm.cliente.trim();
 
     if (!cliente) return flash("Ingresá un cliente.");
@@ -348,40 +428,92 @@ export default function App() {
       tipoMovimiento === "pago"
         ? -saldoFavorPreview
         : debePreview - Math.max(pagoTotal - valorNum, 0) - ajusteCCNum;
-
-    const movimiento: Movimiento = {
-      id: movimientoEditandoId ?? makeId(),
-      fecha: today(),
-      cliente,
-      cantidad: tipoMovimiento === "pago" ? 0 : cantidadNum,
-      tipoHuevo:
+   
+      const payload = {
+        fecha: today(),
+        cliente,
+        cantidad: tipoMovimiento === "pago" ? 0 : cantidadNum,
+        tipo_huevo:
         tipoMovimiento === "pago" || tipoMovimiento === "deuda"
-          ? ""
-          : movForm.tipoHuevo,
-      tipoMovimiento,
-      valor: valorNum,
-      efectivo: efectivoNum,
-      transferencia: transferenciaNum,
-      saldoImpacto,
-      nota: movForm.nota.trim(),
-    };
+        ? null
+        : movForm.tipoHuevo,
+        tipo_movimiento: tipoMovimiento,
+        valor: valorNum,
+        efectivo: efectivoNum,
+        transferencia: transferenciaNum,
+        saldo_impacto: saldoImpacto,
+        nota: movForm.nota.trim(),
+        };
 
-    if (movimientoEditandoId) {
+        if (movimientoEditandoId) {
       const anterior = movimientos.find((m) => m.id === movimientoEditandoId);
-      if (anterior) upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+      if (anterior) {
+        await upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+      }
+
+      const { data, error } = await supabase
+        .from("movimientos")
+        .update(payload)
+        .eq("id", Number(movimientoEditandoId))
+        .select()
+        .single();
+
+      if (error) {
+        console.error(error);
+        return flash("No se pudo actualizar el movimiento.");
+      }
+
+      const movimientoActualizado: Movimiento = {
+        id: String(data.id),
+        fecha: data.fecha,
+        cliente: data.cliente,
+        cantidad: Number(data.cantidad ?? 0),
+        tipoHuevo: (data.tipo_huevo ?? "") as TipoHuevo,
+        tipoMovimiento: data.tipo_movimiento as TipoMovimiento,
+        valor: Number(data.valor ?? 0),
+        efectivo: Number(data.efectivo ?? 0),
+        transferencia: Number(data.transferencia ?? 0),
+        saldoImpacto: Number(data.saldo_impacto ?? 0),
+        nota: data.nota ?? "",
+      };
 
       setMovimientos((prev) =>
-        prev.map((m) => (m.id === movimientoEditandoId ? movimiento : m)),
+        prev.map((m) => (m.id === movimientoEditandoId ? movimientoActualizado : m)),
       );
 
-      upsertClienteSaldo(cliente, saldoImpacto);
+      await upsertClienteSaldo(cliente, saldoImpacto);
       if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
       limpiarMovimiento();
       return flash("Movimiento actualizado.");
     }
 
-    setMovimientos((prev) => [movimiento, ...prev]);
-    upsertClienteSaldo(cliente, saldoImpacto);
+    const { data, error } = await supabase
+      .from("movimientos")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error) {
+      console.error(error);
+      return flash("No se pudo guardar el movimiento.");
+    }
+
+    const movimientoNuevo: Movimiento = {
+      id: String(data.id),
+      fecha: data.fecha,
+      cliente: data.cliente,
+      cantidad: Number(data.cantidad ?? 0),
+      tipoHuevo: (data.tipo_huevo ?? "") as TipoHuevo,
+      tipoMovimiento: data.tipo_movimiento as TipoMovimiento,
+      valor: Number(data.valor ?? 0),
+      efectivo: Number(data.efectivo ?? 0),
+      transferencia: Number(data.transferencia ?? 0),
+      saldoImpacto: Number(data.saldo_impacto ?? 0),
+      nota: data.nota ?? "",
+    };
+
+    setMovimientos((prev) => [movimientoNuevo, ...prev]);
+    await upsertClienteSaldo(cliente, saldoImpacto);
     if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
     limpiarMovimiento();
     flash("Movimiento guardado.");
@@ -403,9 +535,21 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function borrarMovimiento(id: string) {
+  async function borrarMovimiento(id: string) {
     const anterior = movimientos.find((m) => m.id === id);
-    if (anterior) upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+    if (anterior) {
+      await upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
+    }
+
+    const { error } = await supabase
+      .from("movimientos")
+      .delete()
+      .eq("id", Number(id));
+
+    if (error) {
+      console.error(error);
+      return flash("No se pudo eliminar el movimiento.");
+    }
 
     setMovimientos((prev) => prev.filter((m) => m.id !== id));
 
@@ -413,11 +557,25 @@ export default function App() {
     flash("Movimiento eliminado.");
   }
 
-  function guardarCliente() {
+  async function guardarCliente() {
     const nombre = clienteForm.nombre.trim();
     if (!nombre) return flash("Ingresá un nombre.");
 
     if (clienteEditandoId) {
+      const { error } = await supabase
+        .from("clientes")
+        .update({
+          nombre,
+          direccion: clienteForm.direccion.trim(),
+          telefono: clienteForm.telefono.trim(),
+        })
+        .eq("id", clienteEditandoId);
+
+      if (error) {
+        console.error(error);
+        return flash("No se pudo actualizar el cliente.");
+      }
+
       setClientes((prev) =>
         prev.map((c) =>
           c.id === clienteEditandoId
@@ -430,6 +588,7 @@ export default function App() {
             : c,
         ),
       );
+
       setClienteEditandoId(null);
       setClienteForm(emptyCliente);
       setMostrarClienteForm(false);
@@ -439,17 +598,31 @@ export default function App() {
     const existe = clientes.some((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
     if (existe) return flash("Ese cliente ya existe.");
 
-    setClientes((prev) => [
-      {
-        id: makeId(),
+    const { data, error } = await supabase
+      .from("clientes")
+      .insert({
         nombre,
         direccion: clienteForm.direccion.trim(),
         telefono: clienteForm.telefono.trim(),
         saldo: 0,
-      },
-      ...prev,
-    ]);
+      })
+      .select()
+      .single();
 
+    if (error) {
+      console.error(error);
+      return flash("No se pudo guardar el cliente.");
+    }
+
+    const clienteNuevo: Cliente = {
+      id: String(data.id),
+      nombre: data.nombre ?? "",
+      direccion: data.direccion ?? "",
+      telefono: data.telefono ? String(data.telefono) : "",
+      saldo: Number(data.saldo ?? 0),
+    };
+
+    setClientes((prev) => [clienteNuevo, ...prev]);
     setClienteForm(emptyCliente);
     setMostrarClienteForm(false);
     flash("Cliente agregado.");
@@ -502,7 +675,6 @@ export default function App() {
     }));
 
     setStock(stockSiguiente);
-    setMovimientos([]);
     setReparto([]);
     limpiarMovimiento();
 
