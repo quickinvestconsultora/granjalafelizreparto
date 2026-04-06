@@ -131,7 +131,7 @@ function downloadCsv(filename: string, rows: Record<string, string | number>[]):
       headers
         .map((header) => {
           const value = row[header] ?? "";
-          const normalized = String(value).replaceAll('"', '""');
+          const normalized = String(value).replace(/"/g, '""');
           return `"${normalized}"`;
         })
         .join(";"),
