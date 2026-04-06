@@ -72,7 +72,6 @@ const TIPOS: Exclude<TipoHuevo, "">[] = ["B1", "B2", "B3", "C1", "EXT", "CC", "C
 const STORAGE = {
   stock: "granja_pro_stock_v5",
   historial: "granja_pro_historial_v5",
-  reparto: "granja_pro_reparto_v5",
 };
 
 const emptyCliente: ClienteForm = {
@@ -250,10 +249,27 @@ export default function App() {
         );
       }
 
+      const { data: repartoData, error: repartoError } = await supabase
+        .from("reparto")
+        .select("*")
+        .eq("fecha", today())
+        .order("created_at", { ascending: true });
+
+      if (repartoError) {
+        console.error("Error cargando reparto:", repartoError);
+      } else {
+        setReparto(
+          (repartoData ?? []).map((r) => ({
+            id: String(r.id),
+            nombre: r.nombre ?? "",
+            direccion: r.direccion ?? "",
+            fecha: r.fecha,
+          })),
+        );
+      }
+
       setStock(load(STORAGE.stock, createInitialStock()));
       setHistorial(load(STORAGE.historial, []));
-      const repartoGuardado = load<RepartoItem[]>(STORAGE.reparto, []);
-      setReparto(repartoGuardado.filter((r) => r.fecha === today()));
     }
 
     cargarDatos();
@@ -261,7 +277,6 @@ export default function App() {
 
   useEffect(() => save(STORAGE.stock, stock), [stock]);
   useEffect(() => save(STORAGE.historial, historial), [historial]);
-  useEffect(() => save(STORAGE.reparto, reparto), [reparto]);
 
   const valorNum = Number(movForm.valor || 0);
   const efectivoNum = Number(movForm.efectivo || 0);
@@ -392,7 +407,7 @@ export default function App() {
     setMovimientoEditandoId(null);
   }
 
-  function asegurarRepartoDelCliente(nombre: string) {
+  async function asegurarRepartoDelCliente(nombre: string) {
     const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
     const nombreFinal = cli?.nombre ?? nombre;
 
@@ -404,15 +419,29 @@ export default function App() {
       return;
     }
 
-    setReparto((prev) => [
-      ...prev,
-      {
-        id: makeId(),
+    const { data, error } = await supabase
+      .from("reparto")
+      .insert({
         nombre: nombreFinal,
         direccion: cli?.direccion || "Sin dirección",
         fecha: today(),
-      },
-    ]);
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error agregando a reparto:", error);
+      return;
+    }
+
+    const nuevo: RepartoItem = {
+      id: String(data.id),
+      nombre: data.nombre ?? "",
+      direccion: data.direccion ?? "",
+      fecha: data.fecha,
+    };
+
+    setReparto((prev) => [...prev, nuevo]);
   }
 
   async function guardarMovimiento() {
@@ -429,24 +458,24 @@ export default function App() {
       tipoMovimiento === "pago"
         ? -saldoFavorPreview
         : debePreview - Math.max(pagoTotal - valorNum, 0) - ajusteCCNum;
-   
-      const payload = {
-        fecha: today(),
-        cliente,
-        cantidad: tipoMovimiento === "pago" ? 0 : cantidadNum,
-        tipo_huevo:
-        tipoMovimiento === "pago" || tipoMovimiento === "deuda"
-        ? null
-        : movForm.tipoHuevo,
-        tipo_movimiento: tipoMovimiento,
-        valor: valorNum,
-        efectivo: efectivoNum,
-        transferencia: transferenciaNum,
-        saldo_impacto: saldoImpacto,
-        nota: movForm.nota.trim(),
-        };
 
-        if (movimientoEditandoId) {
+    const payload = {
+      fecha: today(),
+      cliente,
+      cantidad: tipoMovimiento === "pago" ? 0 : cantidadNum,
+      tipo_huevo:
+        tipoMovimiento === "pago" || tipoMovimiento === "deuda"
+          ? null
+          : movForm.tipoHuevo,
+      tipo_movimiento: tipoMovimiento,
+      valor: valorNum,
+      efectivo: efectivoNum,
+      transferencia: transferenciaNum,
+      saldo_impacto: saldoImpacto,
+      nota: movForm.nota.trim(),
+    };
+
+    if (movimientoEditandoId) {
       const anterior = movimientos.find((m) => m.id === movimientoEditandoId);
       if (anterior) {
         await upsertClienteSaldo(anterior.cliente, -anterior.saldoImpacto);
@@ -483,7 +512,7 @@ export default function App() {
       );
 
       await upsertClienteSaldo(cliente, saldoImpacto);
-      if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
+      if (tipoMovimiento !== "pago") await asegurarRepartoDelCliente(cliente);
       limpiarMovimiento();
       return flash("Movimiento actualizado.");
     }
@@ -515,7 +544,7 @@ export default function App() {
 
     setMovimientos((prev) => [movimientoNuevo, ...prev]);
     await upsertClienteSaldo(cliente, saldoImpacto);
-    if (tipoMovimiento !== "pago") asegurarRepartoDelCliente(cliente);
+    if (tipoMovimiento !== "pago") await asegurarRepartoDelCliente(cliente);
     limpiarMovimiento();
     flash("Movimiento guardado.");
   }
@@ -682,7 +711,7 @@ export default function App() {
     flash("Día guardado y nuevo reparto iniciado con el stock final como inicial.");
   }
 
-  function agregarRepartoManual(nombreRaw?: string) {
+  async function agregarRepartoManual(nombreRaw?: string) {
     const nombre = (nombreRaw ?? repartoTexto).trim();
     if (!nombre) return flash("Ingresá un nombre para reparto.");
 
@@ -697,21 +726,44 @@ export default function App() {
       return flash("Ese cliente ya está en el reparto de hoy.");
     }
 
-    setReparto((prev) => [
-      ...prev,
-      {
-        id: makeId(),
+    const { data, error } = await supabase
+      .from("reparto")
+      .insert({
         nombre: nombreFinal,
         direccion: cli?.direccion || "Sin dirección",
         fecha: today(),
-      },
-    ]);
+      })
+      .select()
+      .single();
 
+    if (error) {
+      console.error("Error agregando reparto manual:", error);
+      return flash("No se pudo agregar al reparto.");
+    }
+
+    const nuevo: RepartoItem = {
+      id: String(data.id),
+      nombre: data.nombre ?? "",
+      direccion: data.direccion ?? "",
+      fecha: data.fecha,
+    };
+
+    setReparto((prev) => [...prev, nuevo]);
     setRepartoTexto("");
     flash("Agregado al reparto.");
   }
 
-  function quitarReparto(id: string) {
+  async function quitarReparto(id: string) {
+    const { error } = await supabase
+      .from("reparto")
+      .delete()
+      .eq("id", Number(id));
+
+    if (error) {
+      console.error("Error quitando reparto:", error);
+      return flash("No se pudo quitar del reparto.");
+    }
+
     setReparto((prev) => prev.filter((r) => r.id !== id));
   }
 
@@ -768,587 +820,587 @@ export default function App() {
     downloadCsv(`historial-${dia.fecha}.csv`, rows);
   }
 
-return (
-  <AuthGate>
-    <div className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900">
-      <div className="mx-auto max-w-7xl space-y-5">
-        <div className={`${cardClass()} p-5`}>
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-4">
-              <img
-                src={logo}
-                alt="Logo Granja La Feliz"
-                className="h-16 w-16 rounded-2xl object-contain bg-white p-2 shadow-sm"
-              />
-              <div>
-                <h1 className="text-2xl font-bold">Granja La Feliz Reparto</h1>
-                <p className="text-sm text-slate-500">
-                  Versión completa con guardado del día, reparto, stock y clientes.
-                </p>
+  return (
+    <AuthGate>
+      <div className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900">
+        <div className="mx-auto max-w-7xl space-y-5">
+          <div className={`${cardClass()} p-5`}>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-4">
+                <img
+                  src={logo}
+                  alt="Logo Granja La Feliz"
+                  className="h-16 w-16 rounded-2xl object-contain bg-white p-2 shadow-sm"
+                />
+                <div>
+                  <h1 className="text-2xl font-bold">Granja La Feliz Reparto</h1>
+                  <p className="text-sm text-slate-500">
+                    Versión completa con guardado del día, reparto, stock y clientes.
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <StatCard title="Movimientos" value={movimientos.length} />
+                <StatCard title="Clientes" value={clientes.length} />
+                <StatCard title="Debe" value={formatMoney(totalDebe)} />
+                <StatCard title="Fecha" value={today()} />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <StatCard title="Movimientos" value={movimientos.length} />
-              <StatCard title="Clientes" value={clientes.length} />
-              <StatCard title="Debe" value={formatMoney(totalDebe)} />
-              <StatCard title="Fecha" value={today()} />
+          </div>
+
+          {mensaje && (
+            <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              {mensaje}
             </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button className={tabClass(tab === "reparto")} onClick={() => setTab("reparto")}>
+              Reparto
+            </button>
+            <button className={tabClass(tab === "carga")} onClick={() => setTab("carga")}>
+              Carga
+            </button>
+            <button className={tabClass(tab === "movimientos")} onClick={() => setTab("movimientos")}>
+              Movimientos
+            </button>
+            <button className={tabClass(tab === "stock")} onClick={() => setTab("stock")}>
+              Stock
+            </button>
+            <button className={tabClass(tab === "historial")} onClick={() => setTab("historial")}>
+              Historial
+            </button>
+            <button className={tabClass(tab === "clientes")} onClick={() => setTab("clientes")}>
+              Clientes
+            </button>
           </div>
-        </div>
 
-        {mensaje && (
-          <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-            {mensaje}
-          </div>
-        )}
+          {tab === "reparto" && (
+            <div className={`${cardClass()} p-5`}>
+              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <h2 className="text-xl font-semibold">Reparto del día</h2>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <div className="relative min-w-[260px]">
+                    <input
+                      className={inputClass()}
+                      value={repartoTexto}
+                      onChange={(e) => setRepartoTexto(e.target.value)}
+                      placeholder="Agregar cliente o esporádico"
+                    />
+                    {sugerenciasReparto.length > 0 && repartoTexto.trim() && (
+                      <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
+                        {sugerenciasReparto.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                            onClick={() => agregarRepartoManual(c.nombre)}
+                          >
+                            {c.nombre}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <button className={buttonClass(true)} onClick={() => agregarRepartoManual()}>
+                      Agregar reparto
+                    </button>
+                    <button className={buttonClass(false)} onClick={exportarCSVReparto}>
+                      Exportar CSV
+                    </button>
+                  </div>
+                </div>
+              </div>
 
-        <div className="flex flex-wrap gap-2">
-          <button className={tabClass(tab === "reparto")} onClick={() => setTab("reparto")}>
-            Reparto
-          </button>
-          <button className={tabClass(tab === "carga")} onClick={() => setTab("carga")}>
-            Carga
-          </button>
-          <button className={tabClass(tab === "movimientos")} onClick={() => setTab("movimientos")}>
-            Movimientos
-          </button>
-          <button className={tabClass(tab === "stock")} onClick={() => setTab("stock")}>
-            Stock
-          </button>
-          <button className={tabClass(tab === "historial")} onClick={() => setTab("historial")}>
-            Historial
-          </button>
-          <button className={tabClass(tab === "clientes")} onClick={() => setTab("clientes")}>
-            Clientes
-          </button>
-        </div>
+              <div className="space-y-3">
+                {reparto.length === 0 && (
+                  <div className="text-sm text-slate-500">
+                    Todavía no hay reparto cargado para hoy.
+                  </div>
+                )}
 
-        {tab === "reparto" && (
-          <div className={`${cardClass()} p-5`}>
-            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <h2 className="text-xl font-semibold">Reparto del día</h2>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <div className="relative min-w-[260px]">
+                {reparto.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className="block w-full rounded-xl border border-slate-200 p-4 text-left hover:bg-slate-50"
+                    onClick={() => quitarReparto(r.id)}
+                  >
+                    <div className="font-semibold">{r.nombre}</div>
+                    <div className="text-sm text-slate-500">{r.direccion}</div>
+                    <div className="mt-1 text-xs text-slate-400">Tocar para quitar del reparto</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === "carga" && (
+            <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+              <div className={`${cardClass()} p-5`}>
+                <h2 className="mb-4 text-xl font-semibold">
+                  {movimientoEditandoId ? "Editar movimiento" : "Nuevo movimiento"}
+                </h2>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="relative md:col-span-2">
+                    <label className="mb-2 block text-sm">Cliente</label>
+                    <input
+                      className={inputClass()}
+                      value={movForm.cliente}
+                      onChange={(e) => setMovForm((p) => ({ ...p, cliente: e.target.value }))}
+                      placeholder="Nombre del cliente"
+                    />
+                    {sugerenciasClientes.length > 0 && movForm.cliente.trim() && (
+                      <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
+                        {sugerenciasClientes.map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+                            onClick={() => setMovForm((p) => ({ ...p, cliente: c.nombre }))}
+                          >
+                            {c.nombre}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Cantidad</label>
+                    <input
+                      className={inputClass()}
+                      type="number"
+                      value={movForm.cantidad}
+                      onChange={(e) => setMovForm((p) => ({ ...p, cantidad: e.target.value }))}
+                      placeholder="Opcional"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Tipo huevo</label>
+                    <select
+                      className={inputClass()}
+                      value={movForm.tipoHuevo}
+                      onChange={(e) => setMovForm((p) => ({ ...p, tipoHuevo: e.target.value as TipoHuevo }))}
+                    >
+                      <option value="">Sin tipo</option>
+                      {TIPOS.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Valor</label>
+                    <input
+                      className={inputClass()}
+                      type="number"
+                      value={movForm.valor}
+                      onChange={(e) => setMovForm((p) => ({ ...p, valor: e.target.value }))}
+                      placeholder="Para venta o deuda"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Efectivo</label>
+                    <input
+                      className={inputClass()}
+                      type="number"
+                      value={movForm.efectivo}
+                      onChange={(e) => setMovForm((p) => ({ ...p, efectivo: e.target.value }))}
+                      placeholder="Para pago o venta"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Transferencia</label>
+                    <input
+                      className={inputClass()}
+                      type="number"
+                      value={movForm.transferencia}
+                      onChange={(e) => setMovForm((p) => ({ ...p, transferencia: e.target.value }))}
+                      placeholder="Para pago o venta"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm">Cuenta corriente</label>
+                    <input
+                      className={inputClass()}
+                      type="number"
+                      value={movForm.cuentaCorriente}
+                      onChange={(e) => setMovForm((p) => ({ ...p, cuentaCorriente: e.target.value }))}
+                      placeholder="Ajuste opcional"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <label className="mb-2 block text-sm">Nota</label>
+                    <input
+                      className={inputClass()}
+                      value={movForm.nota}
+                      onChange={(e) => setMovForm((p) => ({ ...p, nota: e.target.value }))}
+                      placeholder="Aclaración opcional"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700">
+                  <div>
+                    <strong>Tipo detectado:</strong> {tipoMovimiento}
+                  </div>
+                  <div>
+                    <strong>Debe:</strong> {formatMoney(debePreview)}
+                  </div>
+                  <div>
+                    <strong>Saldo a favor / pago:</strong> {formatMoney(saldoFavorPreview)}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button className={buttonClass(true)} onClick={guardarMovimiento}>
+                    {movimientoEditandoId ? "Guardar cambios" : "Guardar movimiento"}
+                  </button>
+                  <button className={buttonClass(false)} onClick={limpiarMovimiento}>
+                    Limpiar
+                  </button>
+                </div>
+              </div>
+
+              <div className={`${cardClass()} p-5`}>
+                <h2 className="mb-4 text-xl font-semibold">Cómo usar</h2>
+                <div className="space-y-3 text-sm text-slate-600">
+                  <div className="rounded-xl bg-slate-100 p-3">
+                    <strong>Deuda:</strong> cliente + valor.
+                  </div>
+                  <div className="rounded-xl bg-slate-100 p-3">
+                    <strong>Pago:</strong> cliente + efectivo y/o transferencia.
+                  </div>
+                  <div className="rounded-xl bg-slate-100 p-3">
+                    <strong>Venta:</strong> valor + cantidad o tipo.
+                  </div>
+                  <div className="rounded-xl bg-slate-100 p-3">
+                    Al guardar una venta o deuda, el cliente también se agrega al reparto del día.
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === "movimientos" && (
+            <div className={`${cardClass()} p-5`}>
+              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <h2 className="text-xl font-semibold">Movimientos</h2>
+                <div className="flex flex-col gap-2 sm:flex-row">
                   <input
                     className={inputClass()}
-                    value={repartoTexto}
-                    onChange={(e) => setRepartoTexto(e.target.value)}
-                    placeholder="Agregar cliente o esporádico"
+                    value={busqueda}
+                    onChange={(e) => setBusqueda(e.target.value)}
+                    placeholder="Buscar cliente, fecha o movimiento"
                   />
-                  {sugerenciasReparto.length > 0 && repartoTexto.trim() && (
-                    <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
-                      {sugerenciasReparto.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
-                          onClick={() => agregarRepartoManual(c.nombre)}
-                        >
-                          {c.nombre}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <button className={buttonClass(true)} onClick={() => agregarRepartoManual()}>
-                    Agregar reparto
+                  <input
+                    className={inputClass()}
+                    type="date"
+                    value={fechaFiltro}
+                    onChange={(e) => setFechaFiltro(e.target.value)}
+                  />
+                  <button className={buttonClass(false)} onClick={() => setFechaFiltro("")}>
+                    Limpiar
                   </button>
-                  <button className={buttonClass(false)} onClick={exportarCSVReparto}>
+                  <button className={buttonClass(false)} onClick={exportarCSVMovimientos}>
                     Exportar CSV
                   </button>
                 </div>
               </div>
-            </div>
 
-            <div className="space-y-3">
-              {reparto.length === 0 && (
-                <div className="text-sm text-slate-500">
-                  Todavía no hay reparto cargado para hoy.
-                </div>
-              )}
+              <div className="mb-4 grid gap-3 md:grid-cols-4">
+                <StatCard title="Valor" value={formatMoney(totalValor)} />
+                <StatCard title="Efectivo" value={formatMoney(totalEfectivo)} />
+                <StatCard title="Transferencia" value={formatMoney(totalTransferencia)} />
+                <StatCard title="Debe" value={formatMoney(totalDebe)} />
+              </div>
 
-              {reparto.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  className="block w-full rounded-xl border border-slate-200 p-4 text-left hover:bg-slate-50"
-                  onClick={() => quitarReparto(r.id)}
-                >
-                  <div className="font-semibold">{r.nombre}</div>
-                  <div className="text-sm text-slate-500">{r.direccion}</div>
-                  <div className="mt-1 text-xs text-slate-400">Tocar para quitar del reparto</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+              <div className="overflow-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-left">
+                      <th className="px-2 py-2">Fecha</th>
+                      <th className="px-2 py-2">Cliente</th>
+                      <th className="px-2 py-2">Movimiento</th>
+                      <th className="px-2 py-2">Cant.</th>
+                      <th className="px-2 py-2">Tipo</th>
+                      <th className="px-2 py-2">Valor</th>
+                      <th className="px-2 py-2">Efectivo</th>
+                      <th className="px-2 py-2">Transferencia</th>
+                      <th className="px-2 py-2">Saldo</th>
+                      <th className="px-2 py-2">Nota</th>
+                      <th className="px-2 py-2">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {movimientosFiltrados.length === 0 && (
+                      <tr>
+                        <td colSpan={11} className="px-2 py-8 text-center text-slate-500">
+                          No hay movimientos.
+                        </td>
+                      </tr>
+                    )}
 
-        {tab === "carga" && (
-          <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
-            <div className={`${cardClass()} p-5`}>
-              <h2 className="mb-4 text-xl font-semibold">
-                {movimientoEditandoId ? "Editar movimiento" : "Nuevo movimiento"}
-              </h2>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="relative md:col-span-2">
-                  <label className="mb-2 block text-sm">Cliente</label>
-                  <input
-                    className={inputClass()}
-                    value={movForm.cliente}
-                    onChange={(e) => setMovForm((p) => ({ ...p, cliente: e.target.value }))}
-                    placeholder="Nombre del cliente"
-                  />
-                  {sugerenciasClientes.length > 0 && movForm.cliente.trim() && (
-                    <div className="absolute z-10 mt-1 w-full rounded-xl border border-slate-200 bg-white shadow-lg">
-                      {sugerenciasClientes.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
-                          onClick={() => setMovForm((p) => ({ ...p, cliente: c.nombre }))}
+                    {movimientosFiltrados.map((m) => (
+                      <tr key={m.id} className="border-b border-slate-100 align-top">
+                        <td className="px-2 py-2">{m.fecha}</td>
+                        <td className="px-2 py-2 font-medium">{m.cliente}</td>
+                        <td className="px-2 py-2 capitalize">{m.tipoMovimiento}</td>
+                        <td className="px-2 py-2">{m.cantidad || "-"}</td>
+                        <td className="px-2 py-2">{m.tipoHuevo || "-"}</td>
+                        <td className="px-2 py-2">{formatMoney(m.valor)}</td>
+                        <td className="px-2 py-2">{formatMoney(m.efectivo)}</td>
+                        <td className="px-2 py-2">{formatMoney(m.transferencia)}</td>
+                        <td
+                          className={`px-2 py-2 font-medium ${
+                            m.saldoImpacto > 0
+                              ? "text-red-600"
+                              : m.saldoImpacto < 0
+                                ? "text-emerald-600"
+                                : "text-slate-700"
+                          }`}
                         >
-                          {c.nombre}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Cantidad</label>
-                  <input
-                    className={inputClass()}
-                    type="number"
-                    value={movForm.cantidad}
-                    onChange={(e) => setMovForm((p) => ({ ...p, cantidad: e.target.value }))}
-                    placeholder="Opcional"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Tipo huevo</label>
-                  <select
-                    className={inputClass()}
-                    value={movForm.tipoHuevo}
-                    onChange={(e) => setMovForm((p) => ({ ...p, tipoHuevo: e.target.value as TipoHuevo }))}
-                  >
-                    <option value="">Sin tipo</option>
-                    {TIPOS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
+                          {formatMoney(m.saldoImpacto)}
+                        </td>
+                        <td className="px-2 py-2">{m.nota || "-"}</td>
+                        <td className="px-2 py-2">
+                          <div className="flex gap-2">
+                            <button className={buttonClass(false)} onClick={() => editarMovimiento(m)}>
+                              Editar
+                            </button>
+                            <button className={buttonClass(false)} onClick={() => borrarMovimiento(m.id)}>
+                              Borrar
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
                     ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Valor</label>
-                  <input
-                    className={inputClass()}
-                    type="number"
-                    value={movForm.valor}
-                    onChange={(e) => setMovForm((p) => ({ ...p, valor: e.target.value }))}
-                    placeholder="Para venta o deuda"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Efectivo</label>
-                  <input
-                    className={inputClass()}
-                    type="number"
-                    value={movForm.efectivo}
-                    onChange={(e) => setMovForm((p) => ({ ...p, efectivo: e.target.value }))}
-                    placeholder="Para pago o venta"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Transferencia</label>
-                  <input
-                    className={inputClass()}
-                    type="number"
-                    value={movForm.transferencia}
-                    onChange={(e) => setMovForm((p) => ({ ...p, transferencia: e.target.value }))}
-                    placeholder="Para pago o venta"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm">Cuenta corriente</label>
-                  <input
-                    className={inputClass()}
-                    type="number"
-                    value={movForm.cuentaCorriente}
-                    onChange={(e) => setMovForm((p) => ({ ...p, cuentaCorriente: e.target.value }))}
-                    placeholder="Ajuste opcional"
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="mb-2 block text-sm">Nota</label>
-                  <input
-                    className={inputClass()}
-                    value={movForm.nota}
-                    onChange={(e) => setMovForm((p) => ({ ...p, nota: e.target.value }))}
-                    placeholder="Aclaración opcional"
-                  />
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-xl bg-slate-100 p-4 text-sm text-slate-700">
-                <div>
-                  <strong>Tipo detectado:</strong> {tipoMovimiento}
-                </div>
-                <div>
-                  <strong>Debe:</strong> {formatMoney(debePreview)}
-                </div>
-                <div>
-                  <strong>Saldo a favor / pago:</strong> {formatMoney(saldoFavorPreview)}
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className={buttonClass(true)} onClick={guardarMovimiento}>
-                  {movimientoEditandoId ? "Guardar cambios" : "Guardar movimiento"}
-                </button>
-                <button className={buttonClass(false)} onClick={limpiarMovimiento}>
-                  Limpiar
-                </button>
+                  </tbody>
+                </table>
               </div>
             </div>
+          )}
 
+          {tab === "stock" && (
             <div className={`${cardClass()} p-5`}>
-              <h2 className="mb-4 text-xl font-semibold">Cómo usar</h2>
-              <div className="space-y-3 text-sm text-slate-600">
-                <div className="rounded-xl bg-slate-100 p-3">
-                  <strong>Deuda:</strong> cliente + valor.
-                </div>
-                <div className="rounded-xl bg-slate-100 p-3">
-                  <strong>Pago:</strong> cliente + efectivo y/o transferencia.
-                </div>
-                <div className="rounded-xl bg-slate-100 p-3">
-                  <strong>Venta:</strong> valor + cantidad o tipo.
-                </div>
-                <div className="rounded-xl bg-slate-100 p-3">
-                  Al guardar una venta o deuda, el cliente también se agrega al reparto del día.
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {tab === "movimientos" && (
-          <div className={`${cardClass()} p-5`}>
-            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <h2 className="text-xl font-semibold">Movimientos</h2>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <input
-                  className={inputClass()}
-                  value={busqueda}
-                  onChange={(e) => setBusqueda(e.target.value)}
-                  placeholder="Buscar cliente, fecha o movimiento"
-                />
-                <input
-                  className={inputClass()}
-                  type="date"
-                  value={fechaFiltro}
-                  onChange={(e) => setFechaFiltro(e.target.value)}
-                />
-                <button className={buttonClass(false)} onClick={() => setFechaFiltro("")}>
-                  Limpiar
-                </button>
-                <button className={buttonClass(false)} onClick={exportarCSVMovimientos}>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-xl font-semibold">Stock</h2>
+                <button className={buttonClass(false)} onClick={exportarCSVStock}>
                   Exportar CSV
                 </button>
               </div>
-            </div>
 
-            <div className="mb-4 grid gap-3 md:grid-cols-4">
-              <StatCard title="Valor" value={formatMoney(totalValor)} />
-              <StatCard title="Efectivo" value={formatMoney(totalEfectivo)} />
-              <StatCard title="Transferencia" value={formatMoney(totalTransferencia)} />
-              <StatCard title="Debe" value={formatMoney(totalDebe)} />
-            </div>
-
-            <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 text-left">
-                    <th className="px-2 py-2">Fecha</th>
-                    <th className="px-2 py-2">Cliente</th>
-                    <th className="px-2 py-2">Movimiento</th>
-                    <th className="px-2 py-2">Cant.</th>
-                    <th className="px-2 py-2">Tipo</th>
-                    <th className="px-2 py-2">Valor</th>
-                    <th className="px-2 py-2">Efectivo</th>
-                    <th className="px-2 py-2">Transferencia</th>
-                    <th className="px-2 py-2">Saldo</th>
-                    <th className="px-2 py-2">Nota</th>
-                    <th className="px-2 py-2">Acciones</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {movimientosFiltrados.length === 0 && (
-                    <tr>
-                      <td colSpan={11} className="px-2 py-8 text-center text-slate-500">
-                        No hay movimientos.
-                      </td>
+              <div className="overflow-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-left">
+                      <th className="px-2 py-2">Tipo</th>
+                      <th className="px-2 py-2">Inicial</th>
+                      <th className="px-2 py-2">Carga</th>
+                      <th className="px-2 py-2">Ventas</th>
+                      <th className="px-2 py-2">Final</th>
                     </tr>
-                  )}
+                  </thead>
+                  <tbody>
+                    {stockCalculado.map((s) => (
+                      <tr key={s.tipo} className="border-b border-slate-100">
+                        <td className="px-2 py-2 font-medium">{s.tipo}</td>
+                        <td className="px-2 py-2">
+                          <input
+                            className={inputClass()}
+                            type="number"
+                            value={s.inicial}
+                            onChange={(e) =>
+                              setStock((prev) =>
+                                prev.map((x) =>
+                                  x.tipo === s.tipo ? { ...x, inicial: Number(e.target.value || 0) } : x,
+                                ),
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="px-2 py-2">
+                          <input
+                            className={inputClass()}
+                            type="number"
+                            value={s.carga}
+                            onChange={(e) =>
+                              setStock((prev) =>
+                                prev.map((x) =>
+                                  x.tipo === s.tipo ? { ...x, carga: Number(e.target.value || 0) } : x,
+                                ),
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="px-2 py-2">{s.ventas}</td>
+                        <td className="px-2 py-2 font-semibold">{s.final}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
-                  {movimientosFiltrados.map((m) => (
-                    <tr key={m.id} className="border-b border-slate-100 align-top">
-                      <td className="px-2 py-2">{m.fecha}</td>
-                      <td className="px-2 py-2 font-medium">{m.cliente}</td>
-                      <td className="px-2 py-2 capitalize">{m.tipoMovimiento}</td>
-                      <td className="px-2 py-2">{m.cantidad || "-"}</td>
-                      <td className="px-2 py-2">{m.tipoHuevo || "-"}</td>
-                      <td className="px-2 py-2">{formatMoney(m.valor)}</td>
-                      <td className="px-2 py-2">{formatMoney(m.efectivo)}</td>
-                      <td className="px-2 py-2">{formatMoney(m.transferencia)}</td>
-                      <td
-                        className={`px-2 py-2 font-medium ${
-                          m.saldoImpacto > 0
-                            ? "text-red-600"
-                            : m.saldoImpacto < 0
-                            ? "text-emerald-600"
-                            : "text-slate-700"
-                        }`}
-                      >
-                        {formatMoney(m.saldoImpacto)}
-                      </td>
-                      <td className="px-2 py-2">{m.nota || "-"}</td>
-                      <td className="px-2 py-2">
-                        <div className="flex gap-2">
-                          <button className={buttonClass(false)} onClick={() => editarMovimiento(m)}>
-                            Editar
-                          </button>
-                          <button className={buttonClass(false)} onClick={() => borrarMovimiento(m.id)}>
-                            Borrar
-                          </button>
+          {tab === "historial" && (
+            <div className={`${cardClass()} p-5`}>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-xl font-semibold">Historial</h2>
+                <button className={buttonClass(true)} onClick={guardarDia}>
+                  Guardar día
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {historial.length === 0 && (
+                  <div className="text-sm text-slate-500">Todavía no hay días guardados.</div>
+                )}
+
+                {historial.map((h) => (
+                  <div key={h.id} className="rounded-xl border border-slate-200 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="font-semibold">{h.fecha}</div>
+                        <div className="text-sm text-slate-500">Movimientos: {h.movimientos.length}</div>
+                        <div className="text-sm text-slate-500">Reparto: {h.reparto.length}</div>
+                        <div className="text-sm text-slate-500">
+                          Guardado: {new Date(h.guardadoEn).toLocaleString("es-AR")}
                         </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {tab === "stock" && (
-          <div className={`${cardClass()} p-5`}>
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Stock</h2>
-              <button className={buttonClass(false)} onClick={exportarCSVStock}>
-                Exportar CSV
-              </button>
-            </div>
-
-            <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-200 text-left">
-                    <th className="px-2 py-2">Tipo</th>
-                    <th className="px-2 py-2">Inicial</th>
-                    <th className="px-2 py-2">Carga</th>
-                    <th className="px-2 py-2">Ventas</th>
-                    <th className="px-2 py-2">Final</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stockCalculado.map((s) => (
-                    <tr key={s.tipo} className="border-b border-slate-100">
-                      <td className="px-2 py-2 font-medium">{s.tipo}</td>
-                      <td className="px-2 py-2">
-                        <input
-                          className={inputClass()}
-                          type="number"
-                          value={s.inicial}
-                          onChange={(e) =>
-                            setStock((prev) =>
-                              prev.map((x) =>
-                                x.tipo === s.tipo ? { ...x, inicial: Number(e.target.value || 0) } : x,
-                              ),
-                            )
-                          }
-                        />
-                      </td>
-                      <td className="px-2 py-2">
-                        <input
-                          className={inputClass()}
-                          type="number"
-                          value={s.carga}
-                          onChange={(e) =>
-                            setStock((prev) =>
-                              prev.map((x) =>
-                                x.tipo === s.tipo ? { ...x, carga: Number(e.target.value || 0) } : x,
-                              ),
-                            )
-                          }
-                        />
-                      </td>
-                      <td className="px-2 py-2">{s.ventas}</td>
-                      <td className="px-2 py-2 font-semibold">{s.final}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {tab === "historial" && (
-          <div className={`${cardClass()} p-5`}>
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Historial</h2>
-              <button className={buttonClass(true)} onClick={guardarDia}>
-                Guardar día
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {historial.length === 0 && (
-                <div className="text-sm text-slate-500">Todavía no hay días guardados.</div>
-              )}
-
-              {historial.map((h) => (
-                <div key={h.id} className="rounded-xl border border-slate-200 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-semibold">{h.fecha}</div>
-                      <div className="text-sm text-slate-500">Movimientos: {h.movimientos.length}</div>
-                      <div className="text-sm text-slate-500">Reparto: {h.reparto.length}</div>
-                      <div className="text-sm text-slate-500">
-                        Guardado: {new Date(h.guardadoEn).toLocaleString("es-AR")}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          className={buttonClass(false)}
+                          onClick={() => setHistorialSeleccionadoId((prev) => (prev === h.id ? null : h.id))}
+                        >
+                          {historialSeleccionadoId === h.id ? "Ocultar detalle" : "Ver detalle"}
+                        </button>
+                        <button className={buttonClass(false)} onClick={() => exportarCSVHistorialDia(h)}>
+                          Exportar CSV
+                        </button>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
+
+                    {historialSeleccionadoId === h.id && (
+                      <div className="mt-3 space-y-2 rounded-xl bg-slate-100 p-3 text-sm">
+                        {h.movimientos.map((m) => (
+                          <div key={m.id} className="border-b border-slate-200 py-2 last:border-b-0">
+                            {m.cliente} · {m.tipoMovimiento} · {formatMoney(m.valor)}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === "clientes" && (
+            <div className={`${cardClass()} p-5`}>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2 className="text-xl font-semibold">Clientes</h2>
+                <button className={buttonClass(true)} onClick={() => setMostrarClienteForm((p) => !p)}>
+                  {mostrarClienteForm ? "Cerrar" : "Agregar cliente"}
+                </button>
+              </div>
+
+              {mostrarClienteForm && (
+                <div className="mb-4 grid gap-3 rounded-xl border border-slate-200 p-4 md:grid-cols-3">
+                  <input
+                    className={inputClass()}
+                    placeholder="Nombre"
+                    value={clienteForm.nombre}
+                    onChange={(e) => setClienteForm((p) => ({ ...p, nombre: e.target.value }))}
+                  />
+                  <input
+                    className={inputClass()}
+                    placeholder="Dirección"
+                    value={clienteForm.direccion}
+                    onChange={(e) => setClienteForm((p) => ({ ...p, direccion: e.target.value }))}
+                  />
+                  <input
+                    className={inputClass()}
+                    placeholder="Teléfono"
+                    value={clienteForm.telefono}
+                    onChange={(e) => setClienteForm((p) => ({ ...p, telefono: e.target.value }))}
+                  />
+                  <div className="md:col-span-3 flex gap-2">
+                    <button className={buttonClass(true)} onClick={guardarCliente}>
+                      {clienteEditandoId ? "Guardar cambios" : "Guardar cliente"}
+                    </button>
+                    {clienteEditandoId && (
                       <button
                         className={buttonClass(false)}
-                        onClick={() => setHistorialSeleccionadoId((prev) => (prev === h.id ? null : h.id))}
+                        onClick={() => {
+                          setClienteEditandoId(null);
+                          setClienteForm(emptyCliente);
+                          setMostrarClienteForm(false);
+                        }}
                       >
-                        {historialSeleccionadoId === h.id ? "Ocultar detalle" : "Ver detalle"}
+                        Cancelar
                       </button>
-                      <button className={buttonClass(false)} onClick={() => exportarCSVHistorialDia(h)}>
-                        Exportar CSV
-                      </button>
-                    </div>
+                    )}
                   </div>
-
-                  {historialSeleccionadoId === h.id && (
-                    <div className="mt-3 space-y-2 rounded-xl bg-slate-100 p-3 text-sm">
-                      {h.movimientos.map((m) => (
-                        <div key={m.id} className="border-b border-slate-200 py-2 last:border-b-0">
-                          {m.cliente} · {m.tipoMovimiento} · {formatMoney(m.valor)}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {tab === "clientes" && (
-          <div className={`${cardClass()} p-5`}>
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h2 className="text-xl font-semibold">Clientes</h2>
-              <button className={buttonClass(true)} onClick={() => setMostrarClienteForm((p) => !p)}>
-                {mostrarClienteForm ? "Cerrar" : "Agregar cliente"}
-              </button>
-            </div>
-
-            {mostrarClienteForm && (
-              <div className="mb-4 grid gap-3 rounded-xl border border-slate-200 p-4 md:grid-cols-3">
-                <input
-                  className={inputClass()}
-                  placeholder="Nombre"
-                  value={clienteForm.nombre}
-                  onChange={(e) => setClienteForm((p) => ({ ...p, nombre: e.target.value }))}
-                />
-                <input
-                  className={inputClass()}
-                  placeholder="Dirección"
-                  value={clienteForm.direccion}
-                  onChange={(e) => setClienteForm((p) => ({ ...p, direccion: e.target.value }))}
-                />
-                <input
-                  className={inputClass()}
-                  placeholder="Teléfono"
-                  value={clienteForm.telefono}
-                  onChange={(e) => setClienteForm((p) => ({ ...p, telefono: e.target.value }))}
-                />
-                <div className="md:col-span-3 flex gap-2">
-                  <button className={buttonClass(true)} onClick={guardarCliente}>
-                    {clienteEditandoId ? "Guardar cambios" : "Guardar cliente"}
-                  </button>
-                  {clienteEditandoId && (
-                    <button
-                      className={buttonClass(false)}
-                      onClick={() => {
-                        setClienteEditandoId(null);
-                        setClienteForm(emptyCliente);
-                        setMostrarClienteForm(false);
-                      }}
-                    >
-                      Cancelar
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              {clientes.length === 0 && (
-                <div className="text-sm text-slate-500">Todavía no hay clientes cargados.</div>
               )}
 
-              {clientes.map((c) => (
-                <div key={c.id} className="rounded-xl border border-slate-200 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-semibold">{c.nombre}</div>
-                      <div className="text-sm text-slate-500">{c.direccion || "Sin dirección"}</div>
-                      <div className="text-sm text-slate-500">{c.telefono || "Sin teléfono"}</div>
-                    </div>
+              <div className="space-y-3">
+                {clientes.length === 0 && (
+                  <div className="text-sm text-slate-500">Todavía no hay clientes cargados.</div>
+                )}
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div
-                        className={`rounded-xl px-3 py-2 text-sm font-medium ${
-                          c.saldo > 0
-                            ? "bg-red-50 text-red-700"
-                            : c.saldo < 0
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-slate-100 text-slate-700"
-                        }`}
-                      >
-                        {c.saldo > 0
-                          ? `Deuda: ${formatMoney(c.saldo)}`
-                          : c.saldo < 0
-                          ? `Saldo a favor: ${formatMoney(Math.abs(c.saldo))}`
-                          : `Saldo: ${formatMoney(0)}`}
+                {clientes.map((c) => (
+                  <div key={c.id} className="rounded-xl border border-slate-200 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="font-semibold">{c.nombre}</div>
+                        <div className="text-sm text-slate-500">{c.direccion || "Sin dirección"}</div>
+                        <div className="text-sm text-slate-500">{c.telefono || "Sin teléfono"}</div>
                       </div>
 
-                      <button className={buttonClass(false)} onClick={() => editarCliente(c)}>
-                        Editar
-                      </button>
-                      <button className={buttonClass(false)} onClick={() => abrirWhatsapp(c)}>
-                        WhatsApp
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div
+                          className={`rounded-xl px-3 py-2 text-sm font-medium ${
+                            c.saldo > 0
+                              ? "bg-red-50 text-red-700"
+                              : c.saldo < 0
+                                ? "bg-emerald-50 text-emerald-700"
+                                : "bg-slate-100 text-slate-700"
+                          }`}
+                        >
+                          {c.saldo > 0
+                            ? `Deuda: ${formatMoney(c.saldo)}`
+                            : c.saldo < 0
+                              ? `Saldo a favor: ${formatMoney(Math.abs(c.saldo))}`
+                              : `Saldo: ${formatMoney(0)}`}
+                        </div>
+
+                        <button className={buttonClass(false)} onClick={() => editarCliente(c)}>
+                          Editar
+                        </button>
+                        <button className={buttonClass(false)} onClick={() => abrirWhatsapp(c)}>
+                          WhatsApp
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
-  </AuthGate>
-);
+    </AuthGate>
+  );
 }
