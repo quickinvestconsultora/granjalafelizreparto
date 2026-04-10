@@ -242,7 +242,10 @@ export default function App() {
   const userScopeId = esPrincipal ? usuarioVistaId ?? userId : userId;
   const historialStorageKey = userScopeId ? `granja_pro_historial_${userScopeId}` : "granja_pro_historial_anon";
 
-  async function cargarUsuariosParaAdmin() {
+  async function cargarUsuariosParaAdmin(currentUserId: string) {
+    const ids = new Set<string>();
+    ids.add(currentUserId);
+
     const { data, error } = await supabase
       .from("movimientos")
       .select("user_id")
@@ -250,11 +253,18 @@ export default function App() {
 
     if (error) {
       console.error("Error cargando usuarios disponibles:", error);
-      return;
+    } else {
+      (data ?? []).forEach((x) => {
+        if (x.user_id) ids.add(String(x.user_id));
+      });
     }
 
-    const ids = Array.from(new Set((data ?? []).map((x) => String(x.user_id)).filter(Boolean)));
-    setUsuariosDisponibles(ids.map((id) => ({ id, email: id === MAIN_USER_ID ? "Principal" : id })));
+    const lista = Array.from(ids).map((id) => ({
+      id,
+      email: id === MAIN_USER_ID ? "Principal" : id,
+    }));
+
+    setUsuariosDisponibles(lista);
   }
 
   async function cargarClientes() {
@@ -453,6 +463,92 @@ export default function App() {
     );
   }
 
+  function flash(texto: string) {
+    setMensaje(texto);
+    window.setTimeout(() => setMensaje(""), 2200);
+  }
+
+  function limpiarMovimiento() {
+    setMovForm(emptyMovimiento);
+    setMovimientoEditandoId(null);
+  }
+
+  async function asegurarClienteExiste(nombreRaw: string) {
+    const nombre = nombreRaw.trim();
+    if (!nombre) return false;
+
+    const existente = clientes.find(
+      (c) => c.nombre.trim().toLowerCase() === nombre.toLowerCase(),
+    );
+
+    if (existente) return true;
+
+    const { data, error } = await supabase
+      .from("clientes")
+      .insert({
+        nombre,
+        direccion: "",
+        telefono: "",
+        saldo: 0,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error creando cliente automáticamente:", error);
+      flash("No se pudo crear el cliente automáticamente.");
+      return false;
+    }
+
+    const clienteNuevo: Cliente = {
+      id: String(data.id),
+      nombre: data.nombre ?? "",
+      direccion: data.direccion ?? "",
+      telefono: data.telefono ? String(data.telefono) : "",
+      saldo: Number(data.saldo ?? 0),
+    };
+
+    setClientes((prev) => [clienteNuevo, ...prev]);
+    return true;
+  }
+
+  async function asegurarRepartoDelCliente(nombre: string) {
+    if (!userScopeId) return;
+
+    const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
+    const nombreFinal = cli?.nombre ?? nombre;
+
+    if (reparto.some((r) => r.nombre.toLowerCase() === nombreFinal.toLowerCase() && r.fecha === today())) {
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("reparto")
+      .insert({
+        user_id: userScopeId,
+        nombre: nombreFinal,
+        direccion: cli?.direccion || "Sin dirección",
+        fecha: today(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error agregando a reparto:", error);
+      return;
+    }
+
+    const nuevo: RepartoItem = {
+      id: String(data.id),
+      nombre: data.nombre ?? "",
+      direccion: data.direccion ?? "",
+      fecha: data.fecha,
+      userId: data.user_id ? String(data.user_id) : undefined,
+    };
+
+    setReparto((prev) => [...prev, nuevo]);
+  }
+
   useEffect(() => {
     async function cargarDatosIniciales() {
       const {
@@ -476,7 +572,7 @@ export default function App() {
       await cargarMovimientos(currentUserId, principal);
 
       if (principal) {
-        await cargarUsuariosParaAdmin();
+        await cargarUsuariosParaAdmin(currentUserId);
       }
     }
 
@@ -580,98 +676,16 @@ export default function App() {
   const totalTransferencia = movimientosFiltrados.reduce((acc, m) => acc + m.transferencia, 0);
   const totalValor = movimientosFiltrados.reduce((acc, m) => acc + m.valor, 0);
 
-  function flash(texto: string) {
-    setMensaje(texto);
-    window.setTimeout(() => setMensaje(""), 2200);
-  }
-
-  function limpiarMovimiento() {
-    setMovForm(emptyMovimiento);
-    setMovimientoEditandoId(null);
-  }
-
-  async function asegurarRepartoDelCliente(nombre: string) {
-    if (!userScopeId) return;
-
-    const cli = clientes.find((c) => c.nombre.toLowerCase() === nombre.toLowerCase());
-    const nombreFinal = cli?.nombre ?? nombre;
-
-    if (reparto.some((r) => r.nombre.toLowerCase() === nombreFinal.toLowerCase() && r.fecha === today())) {
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("reparto")
-      .insert({
-        user_id: userScopeId,
-        nombre: nombreFinal,
-        direccion: cli?.direccion || "Sin dirección",
-        fecha: today(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Error agregando a reparto:", error);
-      return;
-    }
-
-    const nuevo: RepartoItem = {
-      id: String(data.id),
-      nombre: data.nombre ?? "",
-      direccion: data.direccion ?? "",
-      fecha: data.fecha,
-      userId: data.user_id ? String(data.user_id) : undefined,
-    };
-
-    setReparto((prev) => [...prev, nuevo]);
-  }
-
   async function guardarMovimiento() {
     if (!userId) return flash("No se encontró el usuario logueado.");
 
     const cliente = movForm.cliente.trim();
-    async function asegurarClienteExiste(nombreRaw: string) {
-  const nombre = nombreRaw.trim();
-  if (!nombre) return false;
-
-  const existente = clientes.find(
-    (c) => c.nombre.trim().toLowerCase() === nombre.toLowerCase(),
-  );
-
-  if (existente) return true;
-
-  const { data, error } = await supabase
-    .from("clientes")
-    .insert({
-      nombre,
-      direccion: "",
-      telefono: "",
-      saldo: 0,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error("Error creando cliente automáticamente:", error);
-    flash("No se pudo crear el cliente automáticamente.");
-    return false;
-  }
-
-  const clienteNuevo: Cliente = {
-    id: String(data.id),
-    nombre: data.nombre ?? "",
-    direccion: data.direccion ?? "",
-    telefono: data.telefono ? String(data.telefono) : "",
-    saldo: Number(data.saldo ?? 0),
-  };
-
-  setClientes((prev) => [clienteNuevo, ...prev]);
-  return true;
-}
 
     if (!cliente) return flash("Ingresá un cliente.");
     if (valorNum === 0 && pagoTotal === 0) return flash("Ingresá un valor o un pago.");
+
+    const clienteOk = await asegurarClienteExiste(cliente);
+    if (!clienteOk) return;
 
     if (tipoMovimiento === "pago" && (cantidadNum > 0 || !!movForm.tipoHuevo)) {
       return flash("Si es pago, no cargues cantidad ni tipo.");
