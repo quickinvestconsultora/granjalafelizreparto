@@ -631,6 +631,44 @@ export default function App() {
     if (!userId) return flash("No se encontró el usuario logueado.");
 
     const cliente = movForm.cliente.trim();
+    async function asegurarClienteExiste(nombreRaw: string) {
+  const nombre = nombreRaw.trim();
+  if (!nombre) return false;
+
+  const existente = clientes.find(
+    (c) => c.nombre.trim().toLowerCase() === nombre.toLowerCase(),
+  );
+
+  if (existente) return true;
+
+  const { data, error } = await supabase
+    .from("clientes")
+    .insert({
+      nombre,
+      direccion: "",
+      telefono: "",
+      saldo: 0,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("Error creando cliente automáticamente:", error);
+    flash("No se pudo crear el cliente automáticamente.");
+    return false;
+  }
+
+  const clienteNuevo: Cliente = {
+    id: String(data.id),
+    nombre: data.nombre ?? "",
+    direccion: data.direccion ?? "",
+    telefono: data.telefono ? String(data.telefono) : "",
+    saldo: Number(data.saldo ?? 0),
+  };
+
+  setClientes((prev) => [clienteNuevo, ...prev]);
+  return true;
+}
 
     if (!cliente) return flash("Ingresá un cliente.");
     if (valorNum === 0 && pagoTotal === 0) return flash("Ingresá un valor o un pago.");
